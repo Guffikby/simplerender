@@ -7,7 +7,10 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (
+    InlineKeyboardMarkup, InlineKeyboardButton,
+    ReplyKeyboardMarkup, KeyboardButton, WebAppInfo, MenuButtonWebApp
+)
 from dotenv import load_dotenv
 
 import database as db
@@ -17,21 +20,18 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "2505")
 PORT = int(os.getenv("PORT", 8080))
+MINI_APP_URL = os.getenv("MINI_APP_URL", "https://ваш_логин.github.io/simple/")
 
 class AdminStates(StatesGroup):
     auth = State()
-    
-    # Предмет
     subject_title = State()
 
-    # Учебник
     book_subject_id = State()
     book_title = State()
     book_grade = State()
     book_year = State()
     book_cover = State()
 
-    # Задание
     task_book_id = State()
     task_chapter = State()
     task_paragraph = State()
@@ -43,6 +43,16 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 authed_admins = set()
 
+# --- КЛАВИАТУРЫ ПОЛЬЗОВАТЕЛЯ ---
+def get_main_reply_keyboard():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="⚡️ Открыть Simple. ГДЗ", web_app=WebAppInfo(url=MINI_APP_URL))],
+            [KeyboardButton(text="📚 Каталог в чате")]
+        ],
+        resize_keyboard=True
+    )
+
 def get_admin_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📐 Добавить предмет", callback_data="add_subj")],
@@ -51,6 +61,124 @@ def get_admin_menu():
         [InlineKeyboardButton(text="📋 Список всего", callback_data="list_all")],
         [InlineKeyboardButton(text="🗑 Удаление элементов", callback_data="del_menu")]
     ])
+
+# ==========================================
+# 1. ПРИВЕТСТВИЕ И ПОЛЬЗОВАТЕЛЬСКАЯ ЧАСТЬ
+# ==========================================
+
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    # Устанавливаем кнопку веб-аппа в меню чата (слева внизу)
+    try:
+        await bot.set_chat_menu_button(
+            chat_id=message.chat.id,
+            menu_button=MenuButtonWebApp(text="Simple. ГДЗ", web_app=WebAppInfo(url=MINI_APP_URL))
+        )
+    except Exception as e:
+        logging.warning(f"Не удалось установить кнопку меню: {e}")
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="⚡️ Открыть Simple. ГДЗ", web_app=WebAppInfo(url=MINI_APP_URL))
+    ]])
+
+    await message.answer(
+        "👋 **Привет! Добро пожаловать в Simple. ГДЗ!**\n\n"
+        "Здесь ты можешь быстро найти решения к параграфам и упражнениям из своих учебников.\n\n"
+        "📱 **Нажми на кнопку ниже**, чтобы открыть удобное приложение, или используй каталог прямо в чате!",
+        reply_markup=get_main_reply_keyboard(),
+        parse_mode="Markdown"
+    )
+    await message.answer("Открыть WebApp:", reply_markup=kb)
+
+
+# --- ПРОСМОТР ГДЗ В ЧАТЕ ---
+
+@dp.message(F.text == "📚 Каталог в чате")
+async def show_chat_catalog(message: types.Message):
+    subjs = await db.get_all_subjects()
+    if not subjs:
+        await message.answer("📭 База решебников пока пуста.")
+        return
+
+    kb = [[InlineKeyboardButton(text=f"📐 {s['title']}", callback_data=f"user_subj_{s['_id']}")] for s in subjs]
+    await message.answer("📐 **Выбери предмет:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="Markdown")
+
+
+@dp.callback_query(F.data.startswith("user_subj_"))
+async def user_open_subject(call: types.CallbackQuery):
+    subj_id = call.data.replace("user_subj_", "")
+    books = await db.get_all_books()
+    user_books = [b for b in books if b.get("subject_id") == subj_id]
+
+    if not user_books:
+        await call.answer(" В этом предмете пока нет учебников.", show_alert=True)
+        return
+
+    kb = [[InlineKeyboardButton(text=f"📘 {b['title']} ({b['grade']})", callback_data=f"user_book_{b['_id']}")] for b in user_books]
+    kb.append([InlineKeyboardButton(text="🔙 К предметам", callback_data="user_back_subjs")])
+    
+    await call.message.edit_text("📘 **Выбери учебник:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="Markdown")
+    await call.answer()
+
+
+@dp.callback_query(F.data == "user_back_subjs")
+async def user_back_subjs(call: types.CallbackQuery):
+    subjs = await db.get_all_subjects()
+    kb = [[InlineKeyboardButton(text=f"📐 {s['title']}", callback_data=f"user_subj_{s['_id']}")] for s in subjs]
+    await call.message.edit_text("📐 **Выбери предмет:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="Markdown")
+    await call.answer()
+
+
+@dp.callback_query(F.data.startswith("user_book_"))
+async def user_open_book(call: types.CallbackQuery):
+    book_id = call.data.replace("user_book_", "")
+    tasks = await db.get_all_tasks()
+    book_tasks = [t for t in tasks if t.get("book_id") == book_id]
+
+    if not book_tasks:
+        await call.answer(" В этом учебнике пока нет загруженных решений.", show_alert=True)
+        return
+
+    kb = []
+    for t in book_tasks:
+        btn_title = f"📝 {t.get('paragraph', '')} ➔ {t.get('category', '')} ➔ {t.get('task_number', '')}"
+        kb.append([InlineKeyboardButton(text=btn_title, callback_data=f"user_task_{t['_id']}")])
+
+    subj_id = book_tasks[0].get("subject_id", "")
+    kb.append([InlineKeyboardButton(text="🔙 К учебникам", callback_data=f"user_subj_{subj_id}")])
+
+    await call.message.edit_text("🔢 **Выбери нужный номер / задание:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="Markdown")
+    await call.answer()
+
+
+@dp.callback_query(F.data.startswith("user_task_"))
+async def user_send_solution(call: types.CallbackQuery):
+    task_id = call.data.replace("user_task_", "")
+    tasks = await db.get_all_tasks()
+    task = next((t for t in tasks if str(t["_id"]) == task_id), None)
+
+    if not task:
+        await call.answer("Решение не найдено.", show_alert=True)
+        return
+
+    caption = (
+        f"📖 **{task.get('chapter', '')}**\n"
+        f"📑 **{task.get('paragraph', '')}**\n"
+        f"📌 **{task.get('category', '')}** — `{task.get('task_number', '')}`\n\n"
+        f"{task.get('answer_text', '')}"
+    )
+
+    if task.get("image_id"):
+        await call.message.answer_photo(photo=task["image_id"], caption=caption, parse_mode="Markdown")
+    else:
+        await call.message.answer(caption, parse_mode="Markdown")
+    
+    await call.answer()
+
+
+# ==========================================
+# 2. АДМИН-ПАНЕЛЬ
+# ==========================================
 
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message, state: FSMContext):
@@ -76,7 +204,7 @@ async def back_to_menu(call: types.CallbackQuery, state: FSMContext):
     await call.message.edit_text("⚙️ **Панель управления Simple. ГДЗ:**", reply_markup=get_admin_menu(), parse_mode="Markdown")
     await call.answer()
 
-# --- 1. ДОБАВЛЕНИЕ ПРЕДМЕТА ---
+# 1. Добавление предмета
 @dp.callback_query(F.data == "add_subj")
 async def start_add_subj(call: types.CallbackQuery, state: FSMContext):
     await state.set_state(AdminStates.subject_title)
@@ -89,7 +217,7 @@ async def process_subj_title(message: types.Message, state: FSMContext):
     await message.answer("✅ Предмет сохранен!", reply_markup=get_admin_menu())
     await state.clear()
 
-# --- 2. ДОБАВЛЕНИЕ УЧЕБНИКА ---
+# 2. Добавление учебника
 @dp.callback_query(F.data == "add_book")
 async def start_add_book(call: types.CallbackQuery, state: FSMContext):
     subjs = await db.get_all_subjects()
@@ -146,7 +274,7 @@ async def process_book_cover(message: types.Message, state: FSMContext):
     await message.answer("✅ Учебник сохранен!", reply_markup=get_admin_menu())
     await state.clear()
 
-# --- 3. ДОБАВЛЕНИЕ ЗАДАНИЯ (6-УРОВНЕВАЯ СТРУКТУРА) ---
+# 3. Добавление решения
 @dp.callback_query(F.data == "add_task")
 async def start_add_task(call: types.CallbackQuery, state: FSMContext):
     books = await db.get_all_books()
@@ -180,7 +308,7 @@ async def process_task_chapter(message: types.Message, state: FSMContext):
 async def process_task_paragraph(message: types.Message, state: FSMContext):
     await state.update_data(paragraph=message.text.strip())
     await state.set_state(AdminStates.task_category)
-    await message.answer("3️⃣ Введи **Категорию после параграфа** (например: *Вопросы и задания*, *Практикум*, *Тестовые задания*):", parse_mode="Markdown")
+    await message.answer("3️⃣ Введи **Категорию после параграфа** (например: *Вопросы и задания*, *Практикум*):", parse_mode="Markdown")
 
 @dp.message(AdminStates.task_category)
 async def process_task_category(message: types.Message, state: FSMContext):
@@ -211,7 +339,7 @@ async def process_task_photo(message: types.Message, state: FSMContext):
     await message.answer("✅ Решение успешно сохранено!", reply_markup=get_admin_menu())
     await state.clear()
 
-# --- 4. СПИСОК ВСЕГО (РАБОЧИЙ) ---
+# 4. Список всего
 @dp.callback_query(F.data == "list_all")
 async def list_all_content(call: types.CallbackQuery):
     if call.from_user.id not in authed_admins: return
@@ -231,7 +359,6 @@ async def list_all_content(call: types.CallbackQuery):
                 text += f"       └── 📝 `{t['chapter']}` ➔ `{t['paragraph']}` ➔ `{t['category']}` ➔ **{t['task_number']}**\n"
         text += "\n"
 
-    # Разбиваем длинное сообщение если превышает лимит TG
     if len(text) > 4000:
         for x in range(0, len(text), 4000):
             await call.message.answer(text[x:x+4000], parse_mode="Markdown")
@@ -239,7 +366,7 @@ async def list_all_content(call: types.CallbackQuery):
         await call.message.answer(text, parse_mode="Markdown")
     await call.answer()
 
-# --- 5. УДАЛЕНИЕ (РАБОЧЕЕ ИНТЕРАКТИВНОЕ МЕНЮ) ---
+# 5. Интерактивное удаление
 @dp.callback_query(F.data == "del_menu")
 async def delete_menu(call: types.CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -260,7 +387,7 @@ async def del_subj_list(call: types.CallbackQuery):
         return
     kb = [[InlineKeyboardButton(text=f"❌ {s['title']}", callback_data=f"confirm_del_subj_{s['_id']}")] for s in subjs]
     kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="del_menu")])
-    await call.message.edit_text("Выбери предмет для удаления (удалится со всеми учебниками):", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    await call.message.edit_text("Выбери предмет для удаления:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
     await call.answer()
 
 @dp.callback_query(F.data.startswith("confirm_del_subj_"))
@@ -297,7 +424,7 @@ async def del_task_list(call: types.CallbackQuery):
         await call.answer()
         return
     kb = []
-    for t in tasks[:30]: # Показываем первые 30
+    for t in tasks[:30]:
         btn_text = f"❌ {t.get('paragraph', '')} -> {t.get('task_number', '')}"
         kb.append([InlineKeyboardButton(text=btn_text, callback_data=f"confirm_del_task_{t['_id']}")])
     kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="del_menu")])
@@ -311,7 +438,11 @@ async def process_del_task(call: types.CallbackQuery):
     await call.message.answer("✅ Решение удалено!")
     await back_to_menu(call, None)
 
-# --- API СЕРВЕР ---
+
+# ==========================================
+# 3. API ЭНДПОИНТЫ ДЛЯ MINIAPP
+# ==========================================
+
 CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, OPTIONS",
