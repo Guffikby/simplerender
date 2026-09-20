@@ -33,11 +33,11 @@ class AdminStates(StatesGroup):
     book_cover = State()
 
     task_book_id = State()
-    task_chapter = State()
+    task_chapter_select = State()
     task_chapter_custom = State()
-    task_paragraph = State()
+    task_paragraph_select = State()
     task_paragraph_custom = State()
-    task_category = State()
+    task_category_select = State()
     task_category_custom = State()
     task_number = State()
     task_photo = State()
@@ -64,6 +64,10 @@ def get_admin_menu():
         [InlineKeyboardButton(text="🗑 Удаление элементов", callback_data="del_menu")]
     ])
 
+# ==========================================
+# 1. СТАРТ И ПОЛЬЗОВАТЕЛЬСКИЙ КАТАЛОГ В ЧАТЕ
+# ==========================================
+
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     try:
@@ -72,14 +76,96 @@ async def cmd_start(message: types.Message):
             menu_button=MenuButtonWebApp(text="Simple. ГДЗ", web_app=WebAppInfo(url=MINI_APP_URL))
         )
     except Exception as e:
-        logging.warning(f"Ошибка кнопки меню: {e}")
+        logging.warning(f" Ошибка кнопки меню: {e}")
 
     await message.answer(
         "👋 **Привет! Добро пожаловать в Simple. ГДЗ!**\n\n"
-        "Нажми кнопку ниже, чтобы открыть приложение или просмотреть каталог в чате.",
+        "Воспользуйся кнопкой ниже для запуска приложения или посмотри каталог прямо в чате.",
         reply_markup=get_main_reply_keyboard(),
         parse_mode="Markdown"
     )
+
+@dp.message(F.text == "📚 Каталог в чате")
+async def show_chat_catalog(message: types.Message):
+    subjs = await db.get_all_subjects()
+    if not subjs:
+        await message.answer("📭 База решебников пока пуста.")
+        return
+
+    kb = [[InlineKeyboardButton(text=f"📐 {s['title']}", callback_data=f"usr_s_{s['_id']}")] for s in subjs]
+    await message.answer("📐 **Выбери предмет:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="Markdown")
+
+@dp.callback_query(F.data.startswith("usr_s_"))
+async def user_open_subject(call: types.CallbackQuery):
+    subj_id = call.data.replace("usr_s_", "")
+    books = await db.get_all_books()
+    user_books = [b for b in books if b.get("subject_id") == subj_id]
+
+    if not user_books:
+        await call.answer(" В этом предмете пока нет учебников.", show_alert=True)
+        return
+
+    kb = [[InlineKeyboardButton(text=f"📘 {b['title']} ({b['grade']})", callback_data=f"usr_b_{b['_id']}")] for b in user_books]
+    kb.append([InlineKeyboardButton(text="🔙 К предметам", callback_data="usr_back_subjs")])
+    
+    await call.message.edit_text("📘 **Выбери учебник:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="Markdown")
+    await call.answer()
+
+@dp.callback_query(F.data == "usr_back_subjs")
+async def user_back_subjs(call: types.CallbackQuery):
+    subjs = await db.get_all_subjects()
+    kb = [[InlineKeyboardButton(text=f"📐 {s['title']}", callback_data=f"usr_s_{s['_id']}")] for s in subjs]
+    await call.message.edit_text("📐 **Выбери предмет:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="Markdown")
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("usr_b_"))
+async def user_open_book(call: types.CallbackQuery):
+    book_id = call.data.replace("usr_b_", "")
+    tasks = await db.get_all_tasks()
+    book_tasks = [t for t in tasks if t.get("book_id") == book_id]
+
+    if not book_tasks:
+        await call.answer(" В этом учебнике пока нет решений.", show_alert=True)
+        return
+
+    kb = []
+    for t in book_tasks:
+        btn_title = f"📝 {t.get('paragraph', '')} ➔ {t.get('category', '')} ➔ {t.get('task_number', '')}"
+        kb.append([InlineKeyboardButton(text=btn_title, callback_data=f"usr_t_{t['_id']}")])
+
+    subj_id = book_tasks[0].get("subject_id", "")
+    kb.append([InlineKeyboardButton(text="🔙 К учебникам", callback_data=f"usr_s_{subj_id}")])
+
+    await call.message.edit_text("🔢 **Выбери нужное задание:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="Markdown")
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("usr_t_"))
+async def user_send_solution(call: types.CallbackQuery):
+    task_id = call.data.replace("usr_t_", "")
+    tasks = await db.get_all_tasks()
+    task = next((t for t in tasks if str(t["_id"]) == task_id), None)
+
+    if not task:
+        await call.answer("Решение не найдено.", show_alert=True)
+        return
+
+    caption = (
+        f"📖 **{task.get('chapter', '')}**\n"
+        f"📑 **{task.get('paragraph', '')}**\n"
+        f"📌 **{task.get('category', '')}** — `{task.get('task_number', '')}`\n\n"
+        f"{task.get('answer_text', '')}"
+    )
+
+    if task.get("image_id"):
+        await call.message.answer_photo(photo=task["image_id"], caption=caption, parse_mode="Markdown")
+    else:
+        await call.message.answer(caption, parse_mode="Markdown")
+    
+    await call.answer()
+
+# ==========================================
+# 2. АДМИН-ПАНЕЛЬ И ФОРМА ДОБАВЛЕНИЯ
+# ==========================================
 
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message, state: FSMContext):
@@ -164,41 +250,41 @@ async def process_book_cover(message: types.Message, state: FSMContext):
     await state.clear()
 
 
-# --- ДОБАВЛЕНИЕ РЕШЕНИЯ (С ВЫБОРОМ ИЛИ СОЗДАНИЕМ ГЛАВ/ПАРАГРАФОВ) ---
+# --- ДОБАВЛЕНИЕ РЕШЕНИЯ (УМНЫЙ ВЫБОР ИЛИ СОЗДАНИЕ) ---
 
 @dp.callback_query(F.data == "add_task")
 async def start_add_task(call: types.CallbackQuery, state: FSMContext):
     books = await db.get_all_books()
     if not books:
-        await call.message.answer("⚠️ Создай сначала учебник!")
+        await call.message.answer("⚠️ Сначала создай учебник!")
         await call.answer()
         return
-    kb = [[InlineKeyboardButton(text=f"{b['title']} ({b['grade']})", callback_data=f"task_book_{b['_id']}")] for b in books]
+    kb = [[InlineKeyboardButton(text=f"{b['title']} ({b['grade']})", callback_data=f"tb_{b['_id']}")] for b in books]
     await state.set_state(AdminStates.task_book_id)
     await call.message.answer("Выбери учебник:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
     await call.answer()
 
-# 1. Выбор или создание ГЛАВЫ
-@dp.callback_query(AdminStates.task_book_id, F.data.startswith("task_book_"))
+# 1. ГЛАВА
+@dp.callback_query(AdminStates.task_book_id, F.data.startswith("tb_"))
 async def process_task_book(call: types.CallbackQuery, state: FSMContext):
-    book_id = call.data.replace("task_book_", "")
+    book_id = call.data.replace("tb_", "")
     await state.update_data(book_id=book_id)
     
-    # Ищем существующие главы
     tasks = await db.get_all_tasks()
     chapters = sorted(list(set([t["chapter"] for t in tasks if t.get("book_id") == book_id and t.get("chapter")])))
 
-    kb = [[InlineKeyboardButton(text=f"📖 {ch}", callback_data=f"sel_ch_{ch}")] for ch in chapters]
-    kb.append([InlineKeyboardButton(text="➕ Создать новую главу", callback_data="new_chapter")])
+    kb = [[InlineKeyboardButton(text=f"📖 {ch}", callback_data=f"ch_{i}")] for i, ch in enumerate(chapters)]
+    kb.append([InlineKeyboardButton(text="➕ Создать новую главу", callback_data="ch_new")])
 
-    await state.set_state(AdminStates.task_chapter)
-    await call.message.answer("📖 Выбери существующую **Главу** или создай новую:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="Markdown")
+    await state.update_data(chapters_list=chapters)
+    await state.set_state(AdminStates.task_chapter_select)
+    await call.message.answer("📖 Выбери **Главу** или создай новую:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="Markdown")
     await call.answer()
 
-@dp.callback_query(AdminStates.task_chapter, F.data == "new_chapter")
+@dp.callback_query(AdminStates.task_chapter_select, F.data == "ch_new")
 async def ask_new_chapter(call: types.CallbackQuery, state: FSMContext):
     await state.set_state(AdminStates.task_chapter_custom)
-    await call.message.answer("Введи название новой главы (например: *Глава 1. Информация*):")
+    await call.message.answer("Введи название новой главы (например: *Глава 1. Информация*):", parse_mode="Markdown")
     await call.answer()
 
 @dp.message(AdminStates.task_chapter_custom)
@@ -206,14 +292,16 @@ async def process_custom_chapter(message: types.Message, state: FSMContext):
     await state.update_data(chapter=message.text.strip())
     await ask_paragraph_step(message, state)
 
-@dp.callback_query(AdminStates.task_chapter, F.data.startswith("sel_ch_"))
+@dp.callback_query(AdminStates.task_chapter_select, F.data.startswith("ch_"))
 async def process_select_chapter(call: types.CallbackQuery, state: FSMContext):
-    ch = call.data.replace("sel_ch_", "")
+    idx = int(call.data.replace("ch_", ""))
+    data = await state.get_data()
+    ch = data["chapters_list"][idx]
     await state.update_data(chapter=ch)
     await ask_paragraph_step(call.message, state)
     await call.answer()
 
-# 2. Выбор или создание ПАРАГРАФА
+# 2. ПАРАГРАФ
 async def ask_paragraph_step(message: types.Message, state: FSMContext):
     data = await state.get_data()
     book_id = data["book_id"]
@@ -222,16 +310,17 @@ async def ask_paragraph_step(message: types.Message, state: FSMContext):
     tasks = await db.get_all_tasks()
     paragraphs = sorted(list(set([t["paragraph"] for t in tasks if t.get("book_id") == book_id and t.get("chapter") == chapter and t.get("paragraph")])))
 
-    kb = [[InlineKeyboardButton(text=f"📑 {p}", callback_data=f"sel_p_{p}")] for p in paragraphs]
-    kb.append([InlineKeyboardButton(text="➕ Создать новый параграф", callback_data="new_paragraph")])
+    kb = [[InlineKeyboardButton(text=f"📑 {p}", callback_data=f"p_{i}")] for i, p in enumerate(paragraphs)]
+    kb.append([InlineKeyboardButton(text="➕ Создать новый параграф", callback_data="p_new")])
 
-    await state.set_state(AdminStates.task_paragraph)
+    await state.update_data(paragraphs_list=paragraphs)
+    await state.set_state(AdminStates.task_paragraph_select)
     await message.answer(f"Глава: *{chapter}*\n\n📑 Выбери **Параграф** или создай новый:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="Markdown")
 
-@dp.callback_query(AdminStates.task_paragraph, F.data == "new_paragraph")
+@dp.callback_query(AdminStates.task_paragraph_select, F.data == "p_new")
 async def ask_new_paragraph(call: types.CallbackQuery, state: FSMContext):
     await state.set_state(AdminStates.task_paragraph_custom)
-    await call.message.answer("Введи название нового параграфа (например: *§ 1.2 Носители информации*):")
+    await call.message.answer("Введи название нового параграфа (например: *§ 1.2 Носители информации*):", parse_mode="Markdown")
     await call.answer()
 
 @dp.message(AdminStates.task_paragraph_custom)
@@ -239,14 +328,16 @@ async def process_custom_paragraph(message: types.Message, state: FSMContext):
     await state.update_data(paragraph=message.text.strip())
     await ask_category_step(message, state)
 
-@dp.callback_query(AdminStates.task_paragraph, F.data.startswith("sel_p_"))
+@dp.callback_query(AdminStates.task_paragraph_select, F.data.startswith("p_"))
 async def process_select_paragraph(call: types.CallbackQuery, state: FSMContext):
-    p = call.data.replace("sel_p_", "")
+    idx = int(call.data.replace("p_", ""))
+    data = await state.get_data()
+    p = data["paragraphs_list"][idx]
     await state.update_data(paragraph=p)
     await ask_category_step(call.message, state)
     await call.answer()
 
-# 3. Выбор или создание КАТЕГОРИИ
+# 3. КАТЕГОРИЯ
 async def ask_category_step(message: types.Message, state: FSMContext):
     data = await state.get_data()
     book_id = data["book_id"]
@@ -256,16 +347,17 @@ async def ask_category_step(message: types.Message, state: FSMContext):
     tasks = await db.get_all_tasks()
     categories = sorted(list(set([t["category"] for t in tasks if t.get("book_id") == book_id and t.get("chapter") == chapter and t.get("paragraph") == paragraph and t.get("category")])))
 
-    kb = [[InlineKeyboardButton(text=f"📌 {cat}", callback_data=f"sel_cat_{cat}")] for cat in categories]
-    kb.append([InlineKeyboardButton(text="➕ Создать новую категорию", callback_data="new_category")])
+    kb = [[InlineKeyboardButton(text=f"📌 {cat}", callback_data=f"cat_{i}")] for i, cat in enumerate(categories)]
+    kb.append([InlineKeyboardButton(text="➕ Создать новую категорию", callback_data="cat_new")])
 
-    await state.set_state(AdminStates.task_category)
+    await state.update_data(categories_list=categories)
+    await state.set_state(AdminStates.task_category_select)
     await message.answer(f"Параграф: *{paragraph}*\n\n📌 Выбери **Категорию** или создай новую:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="Markdown")
 
-@dp.callback_query(AdminStates.task_category, F.data == "new_category")
+@dp.callback_query(AdminStates.task_category_select, F.data == "cat_new")
 async def ask_new_category(call: types.CallbackQuery, state: FSMContext):
     await state.set_state(AdminStates.task_category_custom)
-    await call.message.answer("Введи название новой категории (например: *Задания*, *Вопросы*, *Практикум*):")
+    await call.message.answer("Введи название новой категории (например: *Задания*, *Вопросы*, *Практикум*):", parse_mode="Markdown")
     await call.answer()
 
 @dp.message(AdminStates.task_category_custom)
@@ -273,17 +365,19 @@ async def process_custom_category(message: types.Message, state: FSMContext):
     await state.update_data(category=message.text.strip())
     await ask_task_number_step(message, state)
 
-@dp.callback_query(AdminStates.task_category, F.data.startswith("sel_cat_"))
+@dp.callback_query(AdminStates.task_category_select, F.data.startswith("cat_"))
 async def process_select_category(call: types.CallbackQuery, state: FSMContext):
-    cat = call.data.replace("sel_cat_", "")
+    idx = int(call.data.replace("cat_", ""))
+    data = await state.get_data()
+    cat = data["categories_list"][idx]
     await state.update_data(category=cat)
     await ask_task_number_step(call.message, state)
     await call.answer()
 
-# 4. Номер упражнения и Фото
+# 4. НОМЕР И ФОТО
 async def ask_task_number_step(message: types.Message, state: FSMContext):
     await state.set_state(AdminStates.task_number)
-    await message.answer("🔢 Введи **номер упражнения / вопроса** (например: *№1 с. 14* или *Вопрос 3*):")
+    await message.answer("🔢 Введи **номер упражнения / вопроса** (например: *№1 с. 14* или *Вопрос 3*):", parse_mode="Markdown")
 
 @dp.message(AdminStates.task_number)
 async def process_task_number(message: types.Message, state: FSMContext):
