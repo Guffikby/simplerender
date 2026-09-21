@@ -1,14 +1,13 @@
 import os
+import re
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorClient
 
-# Читаем URI подключения из переменных окружения
 MONGO_URI = os.getenv("MONGO_URI")
 
 if not MONGO_URI:
     raise ValueError("ОШИБКА: Переменная окружения MONGO_URI не задана!")
 
-# Подключаемся к клиенту MongoDB
 cluster = AsyncIOMotorClient(MONGO_URI)
 db = cluster["simple_gdz_db"]
 
@@ -16,37 +15,27 @@ subjects_collection = db["subjects"]
 books_collection = db["books"]
 tasks_collection = db["tasks"]
 
+def extract_number(text: str) -> int:
+    """Вспомогательная функция для численной сортировки (класс 7 -> 7, №12 -> 12)"""
+    match = re.search(r'\d+', text or '')
+    return int(match.group()) if match else 999
 
-# ==========================================
-# 1. РАБОТА С ПРЕДМЕТАМИ
-# ==========================================
-
+# --- ПРЕДМЕТЫ ---
 async def add_subject(title: str):
-    """Добавить новый предмет"""
     return await subjects_collection.insert_one({"title": title})
 
-
 async def get_all_subjects():
-    """Получить список всех предметов"""
-    return await subjects_collection.find().to_list(length=100)
-
+    subjects = await subjects_collection.find().to_list(length=100)
+    return sorted(subjects, key=lambda x: x.get("title", ""))
 
 async def delete_subject(subject_id: str):
-    """Удалить предмет и все привязанные к нему учебники и решения"""
     await subjects_collection.delete_one({"_id": ObjectId(subject_id)})
-    
-    # Находим и удаляем все учебники этого предмета (и задачи к ним)
     books = await books_collection.find({"subject_id": subject_id}).to_list(length=500)
     for b in books:
         await delete_book(str(b["_id"]))
 
-
-# ==========================================
-# 2. РАБОТА С УЧЕБНИКАМИ
-# ==========================================
-
+# --- УЧЕБНИКИ ---
 async def add_book(subject_id: str, title: str, grade: str, year: str, cover_file_id: str = None):
-    """Добавить новый учебник"""
     return await books_collection.insert_one({
         "subject_id": subject_id,
         "title": title,
@@ -55,59 +44,55 @@ async def add_book(subject_id: str, title: str, grade: str, year: str, cover_fil
         "cover_file_id": cover_file_id
     })
 
-
 async def get_all_books():
-    """Получить список всех учебников"""
-    return await books_collection.find().to_list(length=200)
+    books = await books_collection.find().to_list(length=200)
+    # Сортировка учебников сначала по номеру класса, затем по названию
+    return sorted(books, key=lambda b: (extract_number(b.get("grade", "")), b.get("title", "")))
 
+async def update_book_cover(book_id: str, cover_file_id: str):
+    return await books_collection.update_one(
+        {"_id": ObjectId(book_id)},
+        {"$set": {"cover_file_id": cover_file_id}}
+    )
 
 async def delete_book(book_id: str):
-    """Удалить учебник и все его задания"""
     await books_collection.delete_one({"_id": ObjectId(book_id)})
     await tasks_collection.delete_many({"book_id": book_id})
 
-
-# ==========================================
-# 3. РАБОТА С ЗАДАНИЯМИ (6-УРОВНЕВАЯ СТРУКТУРА)
-# ==========================================
-
-async def add_task(
-    book_id: str, 
-    chapter: str, 
-    paragraph: str, 
-    category: str, 
-    task_number: str, 
-    image_id: str, 
-    answer_text: str = ""
-):
-    """Добавить решение по структуре: Глава -> Параграф -> Категория -> Номер/Вопрос"""
+# --- ЗАДАНИЯ (УПРАЖНЕНИЯ) ---
+async def add_task(book_id: str, chapter: str, paragraph: str, category: str, task_number: str, image_id: str, answer_text: str = ""):
     return await tasks_collection.insert_one({
         "book_id": book_id,
-        "chapter": chapter,          # 1. Глава
-        "paragraph": paragraph,      # 2. Параграф
-        "category": category,        # 3. Категория после параграфа
-        "task_number": task_number,  # 4. Вопрос/Номер
+        "chapter": chapter,
+        "paragraph": paragraph,
+        "category": category,
+        "task_number": task_number,
         "image_id": image_id,
         "answer_text": answer_text
     })
 
-
 async def get_all_tasks():
-    """Получить список всех задач"""
-    return await tasks_collection.find().to_list(length=2000)
+    tasks = await tasks_collection.find().to_list(length=2000)
+    # Сортировка решений по номеру упражнения
+    return sorted(tasks, key=lambda t: (
+        t.get("chapter", ""),
+        extract_number(t.get("paragraph", "")),
+        t.get("category", ""),
+        extract_number(t.get("task_number", ""))
+    ))
 
+async def update_task_solution(task_id: str, image_id: str, answer_text: str = ""):
+    """Обновить фото или описание уже существующего решения"""
+    return await tasks_collection.update_one(
+        {"_id": ObjectId(task_id)},
+        {"$set": {"image_id": image_id, "answer_text": answer_text}}
+    )
 
 async def delete_task(task_id: str):
-    """Удалить отдельное решение по его ObjectId"""
     await tasks_collection.delete_one({"_id": ObjectId(task_id)})
 
-
-# ==========================================
-# 4. СБОРКА КАТАЛОГА ДЛЯ REST API
-# ==========================================
-
+# --- КАТАЛОГ ДЛЯ API ---
 async def get_full_catalog():
-    """Возвращает полностью вложенную структуру для WebApp (MiniApp)"""
     subjects = await get_all_subjects()
     books = await get_all_books()
     tasks = await get_all_tasks()
