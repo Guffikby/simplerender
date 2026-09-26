@@ -16,20 +16,24 @@ books_collection = db["books"]
 tasks_collection = db["tasks"]
 
 def clean_for_sort(text: str) -> str:
-    """Вспомогательная очистка ТОЛЬКО для сортировки (в БД сохраняется исходный текст с эмодзи)"""
+    """Очистка строк от эмодзи ИСКЛЮЧИТЕЛЬНО для правильной сортировки"""
     if not text:
         return ""
     clean = re.sub(r'[\U00010000-\U0010ffff\u2600-\u27ff\u2300-\u23ff\u2000-\u206f]', '', text)
     return clean.strip().lower()
 
 def extract_number(text: str) -> int:
-    """Извлечение числа для сортировки классов и номеров"""
+    """Извлечение числа из строки (7 класс -> 7)"""
     match = re.search(r'\d+', text or '')
     return int(match.group()) if match else 999
 
-# --- ПРЕДМЕТЫ ---
+# --- КЛАССЫ И ПРЕДМЕТЫ ---
+async def get_all_grades():
+    books = await books_collection.find().to_list(length=500)
+    grades = list(set([b.get("grade", "1 класс") for b in books if b.get("grade")]))
+    return sorted(grades, key=lambda g: extract_number(g))
+
 async def add_subject(title: str):
-    # Сохраняем оригинальное название со всеми эмодзи
     return await subjects_collection.insert_one({"title": title.strip()})
 
 async def get_all_subjects():
@@ -53,23 +57,17 @@ async def add_book(subject_id: str, title: str, grade: str, year: str, cover_fil
     })
 
 async def get_all_books():
-    books = await books_collection.find().to_list(length=200)
+    books = await books_collection.find().to_list(length=500)
     return sorted(books, key=lambda b: (
         extract_number(b.get("grade", "")),
         clean_for_sort(b.get("title", ""))
     ))
 
-async def update_book_cover(book_id: str, cover_file_id: str):
-    return await books_collection.update_one(
-        {"_id": ObjectId(book_id)},
-        {"$set": {"cover_file_id": cover_file_id}}
-    )
-
 async def delete_book(book_id: str):
     await books_collection.delete_one({"_id": ObjectId(book_id)})
     await tasks_collection.delete_many({"book_id": book_id})
 
-# --- ЗАДАНИЯ (УПРАЖНЕНИЯ) ---
+# --- ЗАДАНИЯ ---
 async def add_task(book_id: str, chapter: str, paragraph: str, category: str, task_number: str, image_id: str, answer_text: str = ""):
     return await tasks_collection.insert_one({
         "book_id": book_id,
@@ -99,7 +97,7 @@ async def update_task_solution(task_id: str, image_id: str, answer_text: str = "
 async def delete_task(task_id: str):
     await tasks_collection.delete_one({"_id": ObjectId(task_id)})
 
-# --- СБОРКА КАТАЛОГА ДЛЯ API ---
+# --- ПОЛНЫЙ КАТАЛОГ ДЛЯ МИНИ-АППА ---
 async def get_full_catalog():
     subjects = await get_all_subjects()
     books = await get_all_books()
